@@ -1,0 +1,96 @@
+# =============================================================================
+# Wiki.js + PostgreSQL + cloudflared — KiKAIWorks deployment
+#
+# Deploys the official Wiki.js image (requarks/wiki:2) against a dedicated
+# PostgreSQL 15 container on the shared kikaiworks-net network.
+# Cloudflared exposes the wiki through a Cloudflare Zero Trust tunnel.
+#
+#   Local access : http://localhost:3100
+#   First run    : complete the web setup wizard (creates admin account)
+#
+# Usage:
+#   docker compose -f Wiki/docker-compose.yml --env-file Wiki/.env up -d
+#
+# IMPORTANT (Cloudflare Zero Trust dashboard):
+#   Set the tunnel's public hostname origin to: http://kikaiworks_wiki:3000
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 15 — dedicated database for Wiki.js
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: kikaiworks_wiki_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${WIKI_DB_USER:-wiki}
+      POSTGRES_PASSWORD: ${WIKI_DB_PASSWORD:-wikijsrocks}
+      POSTGRES_DB: ${WIKI_DB_NAME:-wiki}
+    volumes:
+      - wiki_postgres_data:/var/lib/postgresql/data
+    networks:
+      - kikaiworks-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WIKI_DB_USER:-wiki} -d ${WIKI_DB_NAME:-wiki}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Wiki.js — official image
+  # ---------------------------------------------------------------------------
+  wiki:
+    image: requarks/wiki:2
+    container_name: kikaiworks_wiki
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3100:3000"   # local / NPM admin access (3000 busy by RocketChat)
+    environment:
+      # The official image resolves $(VAR) placeholders baked into its
+      # config.yml from these-env vars on startup.
+      DB_TYPE: postgres
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${WIKI_DB_USER:-wiki}
+      DB_PASS: ${WIKI_DB_PASSWORD:-wikijsrocks}
+      DB_NAME: ${WIKI_DB_NAME:-wiki}
+      TZ: ${TZ:-Asia/Singapore}
+    volumes:
+      - wiki_data:/wiki/data/content
+    networks:
+      - kikaiworks-net
+
+  # ---------------------------------------------------------------------------
+  # Cloudflare Tunnel — exposes http://kikaiworks_wiki:3000
+  #
+  # In the Cloudflare Zero Trust dashboard, set the tunnel's public hostname
+  # origin to: http://kikaiworks_wiki:3000
+  # ---------------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: kikaiworks_wiki_cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${WIKI_CLOUDFLARED_TOKEN:?set WIKI_CLOUDFLARED_TOKEN in Wiki/.env}
+    networks:
+      - kikaiworks-net
+    depends_on:
+      wiki:
+        condition: service_started
+
+volumes:
+  wiki_postgres_data:
+    name: kikaiworks_wiki_postgres_data
+  wiki_data:
+    name: kikaiworks_wiki_data
+
+networks:
+  kikaiworks-net:
+    external: true
+    name: kikaiworks-net
